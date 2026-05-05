@@ -1,5 +1,5 @@
 import { readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import path, { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 import type { Handler } from 'hono/types';
@@ -8,8 +8,11 @@ import updatedFetch from '../src/__create/fetch';
 const API_BASENAME = '/api';
 const api = new Hono();
 
-// Get current directory
-const __dirname = join(fileURLToPath(new URL('.', import.meta.url)), '../src/app/api');
+// Absolute path to the API routes directory
+const apiDir = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '../src/app/api'
+);
 if (globalThis.fetch) {
   globalThis.fetch = updatedFetch;
 }
@@ -28,7 +31,7 @@ async function findRouteFiles(dir: string): Promise<string[]> {
         routes = routes.concat(await findRouteFiles(filePath));
       } else if (file === 'route.js') {
         // Handle root route.js specially
-        if (filePath === join(__dirname, 'route.js')) {
+        if (filePath === join(apiDir, 'route.js')) {
           routes.unshift(filePath); // Add to beginning of array
         } else {
           routes.push(filePath);
@@ -44,8 +47,8 @@ async function findRouteFiles(dir: string): Promise<string[]> {
 
 // Helper function to transform file path to Hono route path
 function getHonoPath(routeFile: string): { name: string; pattern: string }[] {
-  const relativePath = routeFile.replace(__dirname, '');
-  const parts = relativePath.split('/').filter(Boolean);
+  const relativePath = path.relative(apiDir, routeFile);
+  const parts = relativePath.split(path.sep).filter(Boolean);
   const routeParts = parts.slice(0, -1); // Remove 'route.js'
   if (routeParts.length === 0) {
     return [{ name: 'root', pattern: '' }];
@@ -63,10 +66,17 @@ function getHonoPath(routeFile: string): { name: string; pattern: string }[] {
   return transformedParts;
 }
 
+function toViteFsImportUrl(absPath: string): string {
+  // Vite can import absolute files in dev via the /@fs/ prefix.
+  // It expects forward slashes, even on Windows.
+  const normalized = absPath.replace(/\\/g, '/');
+  return `/@fs/${normalized}`;
+}
+
 // Import and register all routes
 async function registerRoutes() {
   const routeFiles = (
-    await findRouteFiles(__dirname).catch((error) => {
+    await findRouteFiles(apiDir).catch((error) => {
       console.error('Error finding route files:', error);
       return [];
     })
@@ -81,7 +91,8 @@ async function registerRoutes() {
 
   for (const routeFile of routeFiles) {
     try {
-      const route = await import(/* @vite-ignore */ `${routeFile}?update=${Date.now()}`);
+      const routeUrl = `${toViteFsImportUrl(routeFile)}?update=${Date.now()}`;
+      const route = await import(/* @vite-ignore */ routeUrl);
 
       const methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
       for (const method of methods) {
@@ -92,9 +103,8 @@ async function registerRoutes() {
             const handler: Handler = async (c) => {
               const params = c.req.param();
               if (import.meta.env.DEV) {
-                const updatedRoute = await import(
-                  /* @vite-ignore */ `${routeFile}?update=${Date.now()}`
-                );
+                const updatedRouteUrl = `${toViteFsImportUrl(routeFile)}?update=${Date.now()}`;
+                const updatedRoute = await import(/* @vite-ignore */ updatedRouteUrl);
                 return await updatedRoute[method](c.req.raw, { params });
               }
               return await route[method](c.req.raw, { params });
